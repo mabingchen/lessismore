@@ -1,0 +1,47 @@
+// this doc shows pipline of database backup
+// connect to remote db servere, backup db, upload to artifactory, send mail.
+// by Bingchen
+
+
+def rslt       = ''
+def dt         = ''
+def fn         = ''
+def SERVER     = Artifactory.server 'artifactory'
+def UPLOADSPEC = ''
+
+node('') {
+    stage('db backup and mail notify') {
+        dt       = new Date().format('yyyy-MM-dd_HH_mm_ss')
+        fn       = "projectname-" + "${dt}" + ".sql"    
+        def dmp_ = "/usr/local/mysql/bin/mysqldump -umbc -pwhoru  -R  -h hostip projectname > ${fn}"
+        def zp_  = "zip -rq ${fn}.zip ./${fn}"
+        try {        
+            sh "${dmp_}"
+            sh "${zp_}"
+        }
+        catch (exc) {
+            echo 'dump or zip failed'    
+        }
+        
+        UPLOADSPEC = """{
+         "files": [
+            {
+              "pattern": "${fn}.zip",
+              "target":  "dir/backup/"
+            }
+         ]
+        }"""
+        
+        try {
+		    def BUILDINFO = SERVER.upload(UPLOADSPEC)
+            SERVER.publishBuildInfo(BUILDINFO)
+        }
+        catch (exc) {
+            echo 'publish failed'
+            mail bcc: '', body: 'Failed ', cc: '', from: 'no_reply', replyTo: '', subject: "[x] ${dt} db backup: Failed", to: 'dev@dev.COM'
+        }
+        
+        mail bcc: '', body: 'Healthy', cc: '', from: 'no_reply', replyTo: '', subject: "[√] ${dt} db backup: Healthy", to: 'dev@dev.COM'       
+        
+    }    
+}    
