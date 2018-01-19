@@ -1,0 +1,248 @@
+// this doc shows pipline of project devops
+// by Bingchen
+
+def CREDENTIALSID = ""
+def GITREV        = ''
+def SERVER        = Artifactory.server ''
+def UPLOADSPEC    = ''
+def DOWNLOADSPEC  = ''
+
+node('project-lin') 
+{
+    stage('checkout code') 
+    {
+        echo 'build'
+        checkout([$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'CloneOption', depth: 0, noTags: false, reference: '', shallow: false, timeout: 30]], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'git-auth', url: 'git@gitlabe:abc/project.git']]])
+    }
+
+    stage('code static check') 
+    {
+        sh '''
+            rm -rf build
+            mkdir build
+            mkdir build/api
+            mkdir build/coverage
+            mkdir build/logs
+            mkdir build/pdepend
+            mkdir build/phpdox
+        '''     
+        parallel( 
+            'PHP Syntax check': {
+                sh '''
+                    PATH=$PATH:/opt/lampp/bin/
+                    /opt/lampp/bin/vendor/bin/parallel-lint ./project/main/library
+                '''
+            },
+            'Lines of Code': {
+                sh '''
+                PATH=$PATH:/opt/lampp/bin/
+                /opt/lampp/bin/vendor/bin/phploc.phar --count-tests --log-csv build/logs/phploc.csv --log-xml build/logs/phploc.xml ./project/main/library/
+                '''
+                    //publishHTML([allowMissing: false, alwaysLinkToLastBuild: false, keepAll: false, reportDir: 'build/logs/', reportFiles: 'phploc.xml', reportName: 'Lines of Code Report', reportTitles: ''])
+                    //perfpublisher healthy: '', metrics: '', name: 'build/logs/phploc.xml', threshold: '', unhealthy: ''
+            },
+            'PHP metrics': {
+                sh '''
+                PATH=$PATH:/opt/lampp/bin/
+                /opt/lampp/bin/vendor/bin/pdepend --jdepend-xml=build/pdepend/jdepend.xml  --summary-xml=build/pdepend/summary.xml --jdepend-chart=build/pdepend/dependencies.svg --overview-pyramid=build/pdepend/overview-pyramid.svg ./project/main/library/
+                '''
+                    //perfpublisher healthy: '', metrics: '', name: 'build/pdepend/jdepend.xml', threshold: '', unhealthy: ''
+                    publishHTML([allowMissing: false, alwaysLinkToLastBuild: false, keepAll: false, reportDir: 'build/pdepend/', reportFiles: 'overview-pyramid.svg', reportName: 'PHP software metrics', reportTitles: ''])
+                //archive 'build/pdepend/*.*'
+            },
+            'Checkstyle': {
+                sh '''
+                    PATH=$PATH:/opt/lampp/bin/
+                    /opt/lampp/bin/vendor/bin/phpcs --config-set ignore_errors_on_exit 2                    
+                    /opt/lampp/bin/vendor/bin/phpcs --report=checkstyle --report-file=build/logs/checkstyle.xml --runtime-set ignore_errors_on_exit 2 --extensions=php -d memory_limit=-1 ./project/main/library/ || exit 0
+                '''
+                checkstyle(pattern: 'build/logs/checkstyle.xml')
+            },
+            'Mess detection': {
+                sh '''
+                    PATH=$PATH:/opt/lampp/bin/
+                    /opt/lampp/bin/vendor/bin/phpmd ./project/main/library/ xml codesize,naming --ignore-violations-on-exit 2 --reportfile build/logs/pmd.xml
+                '''
+                pmd(pattern: 'build/logs/pmd.xml')
+            },
+            
+            'Copy paste detection': {
+               sh '''
+                    PATH=$PATH:/opt/lampp/bin/
+                    /opt/lampp/bin/vendor/bin/phpcpd --log-pmd build/logs/pmd-cpd.xml ./project/main/library/ || exit 0
+                '''
+                dry(pattern: 'build/logs/pmd-cpd.xml')
+            },
+                
+            'python pyLint': {
+                sh '''
+                    pylint --disable=W1202 --errors-only --output-format=parseable --reports=n project/python/*.py > build/logs/pylint.log || echo "pylint exited with $?"
+                '''
+                warnings canComputeNew: true, canResolveRelativePaths: false, categoriesPattern: '', defaultEncoding: '', excludePattern: '', healthy: '', includePattern: '', messagesPattern: '', parserConfigurations: [[parserName: 'PyLint', pattern: 'build/logs/pylint.log']], unHealthy: ''
+            }
+        )
+    }
+    
+
+    stage('build') 
+    {
+        DATETIME = new Date().format('yyyyMMddHHmmss')
+		timeout(time: 20, unit: 'SECONDS') 
+          {
+            GITREV = sh(returnStdout:true, script:"git rev-parse --short HEAD").trim()
+            if (GITREV.length() == 0 ) error "can't get trun revision number."
+          }
+		
+        GITREV =  "${DATETIME}" + "-" + "${GITREV}"
+        
+        def ZIPCMD = "zip -rq project${GITREV}.zip ./project -x *.git*"
+        sh "${ZIPCMD}"
+        UPLOADSPEC = """{
+         "files": [
+            {
+              "pattern": "project${GITREV}.zip",
+              "target":  "project-local/project_daily/"
+            }
+         ]
+        }"""
+        
+        def BUILDINFO = SERVER.upload(UPLOADSPEC)     
+        SERVER.publishBuildInfo(BUILDINFO)
+    }
+    
+}
+
+def credentialsid = ""
+
+stage('deploy to test environment') 
+{
+    parallel(
+        'deploy to test server':{
+            node('project-lin')
+            { 
+                dir('/opt/lampp/htdocs') 
+                {
+                    DOWNLOADSPEC = """{
+                    "files": [
+                    {
+                        "pattern": "project-local/project_daily/project${GITREV}.zip",
+                        "target":  "/opt/lampp/htdocs/"
+                    }
+                    ]
+                    }"""
+                
+                    sh "rm -rf project*"
+                    SERVER.download(DOWNLOADSPEC)
+                    def UNZIPCMD = "unzip -q project_daily/project${GITREV}.zip"
+                    def MVCMD    = "mv project project${GITREV}"
+                    def LNCMD    = "ln -s project${GITREV} project"
+                    sh "${UNZIPCMD}"
+                    sh "${MVCMD}"
+                    sh "${LNCMD}"
+                
+                    sh '''
+                    chmod 777 -R project/main/caches
+                    chmod 777 -R project/static/uploads
+                    '''
+                
+                    def SQLFILE = """{
+                    "files": [
+                    {
+                        "pattern": "project-local/project_daily/project.sql",
+                        "target":  "/opt/lampp/htdocs/"
+                    }
+                    ]
+                    }"""
+                
+                    SERVER.download(SQLFILE)
+                }
+            
+                dir('/opt/lampp/htdocs/project/configs') 
+                {
+                    sh '''
+                    cp  mysql.inc.php mysql.inc.php.bak
+                    sed "s/password/project/" mysql.inc.php.bak > mysql.inc.php
+                    '''
+                }
+            
+                dir('/opt/lampp') 
+                {
+                    sh "./lampp start"
+                }
+            
+                dir('/opt/lampp/bin') 
+                {
+                    sh '''
+                        ./mysql -uroot -pproject -h localhost project < /opt/lampp/htdocs/project_daily/project.sql
+                    '''
+                }
+            
+                dir('/opt/lampp') 
+                {
+                    sh "./lampp reload"
+                }
+                    
+            }
+        }, 
+        'deploy to test client': {
+            node('project-win')
+            {
+                echo 'checkout test code'
+                checkout([$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'CloneOption', noTags: true, reference: '', shallow: true, timeout: 60], [$class: 'CheckoutOption', timeout: 60]], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'git-auth', url: 'git@gitlabe:abc/project.git']]])				
+            }
+        } 
+    )
+}
+
+node('project-win') 
+{
+
+    stage('smoke test') 
+    {
+        echo 'smoke test'
+        bat  'robot --include smoketest --name smoketest --outputdir ./project_deploy/test/smoketest ./project_deploy/test/mbc'
+    }
+    
+    stage('regression test') 
+    {
+        echo 'regression test'
+        bat  'robot --include systemtest --name regression --outputdir ./project_deploy/test/systemtest ./project_deploy/test/mbc'
+        echo 'generate test report'
+        bat  'rebot --name test --outputdir ./project_deploy/test/testresultdir --output output.xml ./project_deploy/test/smoketest/output.xml ./project_deploy/test/systemtest/output.xml'
+        echo 'publish test result'
+        publishTestResults('./project_deploy/test/testresultdir')
+    }
+
+}
+
+node('project-lin') 
+{
+    stage('deliver') 
+    {
+        UPLOADSPEC = """{
+         "files": [
+        {
+          "pattern": "project${GITREV}.zip",
+          "target":  "project-local/project/"
+        }
+         ]
+        }"""
+
+        def BUILDINFO = SERVER.upload(UPLOADSPEC)     
+        SERVER.publishBuildInfo(BUILDINFO)
+    }
+}
+
+
+void publishTestResults(String type) {
+step([
+        $class           : 'hudson.plugins.robot.RobotPublisher',
+        outputPath       : './' + type,
+        passThreshold    : 100,
+        unstableThreshold: 100,
+        otherFiles       : '',
+        reportFileName   : '*report*.html',
+        logFileName      : '*log*.html',
+        outputFileName   : '*output*.xml'
+])
+}
