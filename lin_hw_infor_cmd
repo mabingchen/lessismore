@@ -7,7 +7,7 @@ root@mbc-ubuntu-jenkins:~# cat /proc/meminfo
 
 # From cmd
 root@mbc-ubuntu-jenkins:~# lscpu
-[root@mbc-centos73 ~]# dmidecode -t memory
+[root@mbc-centos73 ~]# dmidecode -t memory  bios/system/baseboard/chassis/processor/memory/cache/connector/slot
 root@mbc-ubuntu-jenkins:~# fdisk -l
 root@mbc-ubuntu-jenkins:~# ifconfig
 [root@mbc-centos73 ~]# lspci
